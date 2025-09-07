@@ -3,7 +3,7 @@
 /**
  * The admin-specific functionality of the plugin.
  *
- * @link       https://yourwebsite.com
+ * @link       https://gurkhatech.com
  * @since      1.0.0
  *
  * @package    Gurkha_WP_Import
@@ -18,7 +18,7 @@
  *
  * @package    Gurkha_WP_Import
  * @subpackage Gurkha_WP_Import/admin
- * @author     Your Name <email@example.com>
+ * @author     Arjan KC <arjan@gurkhatech.com>
  */
 class Gurkha_WP_Import_Admin {
 
@@ -123,7 +123,7 @@ class Gurkha_WP_Import_Admin {
      * @since    1.0.0
      */
     public function display_plugin_setup_page() {
-        include_once( 'partials/gurkha-wp-import-admin-display.php' );
+    include_once plugin_dir_path( __FILE__ ) . 'partials/gurkha-wp-import-admin-display.php';
     }
 
     /**
@@ -169,16 +169,73 @@ class Gurkha_WP_Import_Admin {
                     wp_die( 'Could not extract zip archive.' );
                 }
 
-                // Validate the extracted files
-                $content_file = trailingslashit( $temp_dir ) . 'content.html';
-                $meta_file = trailingslashit( $temp_dir ) . 'meta.json';
+                // Discover content (HTML) and meta (JSON) files recursively
+                $content_file = '';
+                $meta_file = '';
 
-                if ( ! file_exists( $content_file ) || ! file_exists( $meta_file ) ) {
-                    wp_die( 'Invalid zip archive. Missing content.html or meta.json.' );
+                $html_candidates = array();
+                $json_candidates = array();
+
+                $iterator = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator( $temp_dir, RecursiveDirectoryIterator::SKIP_DOTS )
+                );
+
+                foreach ( $iterator as $fileinfo ) {
+                    if ( ! $fileinfo->isFile() ) { continue; }
+                    $ext = strtolower( $fileinfo->getExtension() );
+                    if ( in_array( $ext, array( 'html', 'htm' ), true ) ) {
+                        $html_candidates[] = $fileinfo->getPathname();
+                    } elseif ( 'json' === $ext ) {
+                        $json_candidates[] = $fileinfo->getPathname();
+                    }
+                }
+
+                // Pick HTML: prefer a file named like content/index, else largest by size, else first
+                if ( ! empty( $html_candidates ) ) {
+                    $preferred = array_filter( $html_candidates, function( $p ) {
+                        $name = strtolower( basename( $p ) );
+                        return ( $name === 'content.html' || $name === 'index.html' || $name === 'content.htm' || $name === 'index.htm' );
+                    } );
+                    if ( ! empty( $preferred ) ) {
+                        $content_file = reset( $preferred );
+                    } else {
+                        // choose largest
+                        usort( $html_candidates, function( $a, $b ) { return filesize( $b ) <=> filesize( $a ); } );
+                        $content_file = $html_candidates[0];
+                    }
+                }
+
+                // Pick JSON: prefer one containing required keys
+                if ( ! empty( $json_candidates ) ) {
+                    foreach ( $json_candidates as $candidate ) {
+                        $raw = @file_get_contents( $candidate );
+                        if ( false === $raw ) { continue; }
+                        $raw = $this->sanitize_json( $raw );
+                        $data = json_decode( $raw, true );
+                        if ( json_last_error() === JSON_ERROR_NONE && is_array( $data ) && isset( $data['metaTitle'], $data['slug'] ) ) {
+                            $meta_file = $candidate;
+                            break;
+                        }
+                    }
+                    if ( empty( $meta_file ) ) {
+                        // fallback: first JSON
+                        $meta_file = $json_candidates[0];
+                    }
+                }
+
+                if ( empty( $content_file ) || empty( $meta_file ) ) {
+                    $msg = 'Invalid zip archive. Could not find an HTML content file and a JSON metadata file.';
+                    if ( empty( $content_file ) && ! empty( $html_candidates ) ) {
+                        $msg .= ' Found HTML candidates: ' . esc_html( implode( ', ', array_map( 'basename', $html_candidates ) ) ) . '.';
+                    }
+                    if ( empty( $meta_file ) && ! empty( $json_candidates ) ) {
+                        $msg .= ' Found JSON candidates: ' . esc_html( implode( ', ', array_map( 'basename', $json_candidates ) ) ) . '.';
+                    }
+                    wp_die( $msg );
                 }
 
                 // Process the files
-                $post_id = $this->process_import( $temp_dir );
+                $post_id = $this->process_import( $temp_dir, $content_file, $meta_file );
 
                 // Clean up the temporary directory
                 $this->cleanup_temp_dir( $temp_dir );
@@ -196,20 +253,26 @@ class Gurkha_WP_Import_Admin {
      * @since    1.0.0
      * @param    string    $temp_dir    The temporary directory where the files are located.
      */
-    private function process_import( $temp_dir ) {
-        $meta_file = trailingslashit( $temp_dir ) . 'meta.json';
-        $content_file = trailingslashit( $temp_dir ) . 'content.html';
+    private function process_import( $temp_dir, $content_file, $meta_file ) {
+        // Load meta
+        $meta_raw = file_get_contents( $meta_file );
+        $meta_raw = $this->sanitize_json( $meta_raw );
+        $meta_data = json_decode( $meta_raw, true );
+        if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $meta_data ) ) {
+            wp_die( 'Invalid meta.json: ' . json_last_error_msg() );
+        }
 
-        $meta_data = json_decode( file_get_contents( $meta_file ), true );
+        // Load content
         $content = file_get_contents( $content_file );
 
         // Process images
         $doc = new DOMDocument();
         @$doc->loadHTML( mb_convert_encoding($content, 'HTML-ENTITIES', 'UTF-8'), LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD );
 
-        $images = $doc->getElementsByTagName( 'img' );
+    $images = $doc->getElementsByTagName( 'img' );
+    $image_log = array();
 
-        foreach ( $images as $image ) {
+    foreach ( $images as $image ) {
             $src = $image->getAttribute( 'src' );
 
             // Check if the image is local
@@ -219,10 +282,11 @@ class Gurkha_WP_Import_Admin {
                 if ( file_exists( $image_path ) ) {
                     $upload = wp_upload_bits( basename( $image_path ), null, file_get_contents( $image_path ) );
 
-                    if ( ! $upload['error'] ) {
+            if ( ! $upload['error'] ) {
                         $attachment = array(
-                            'post_mime_type' => $upload['type'],
-                            'post_title'     => preg_replace( '/.[^.]+$/', '', basename( $image_path ) ),
+                // Determine MIME type from uploaded file path
+                'post_mime_type' => wp_check_filetype( $upload['file'] )['type'] ?? '',
+                'post_title'     => preg_replace( '/\.[^.]+$/', '', basename( $image_path ) ),
                             'post_content'   => '',
                             'post_status'    => 'inherit'
                         );
@@ -235,15 +299,15 @@ class Gurkha_WP_Import_Admin {
                             wp_update_attachment_metadata( $attachment_id, $attachment_data );
 
                             $image->setAttribute( 'src', $upload['url'] );
-                            $image_log[] = 'Image '' . $src . '' uploaded successfully.';
+                            $image_log[] = "Image '{$src}' uploaded successfully.";
                         } else {
-                            $image_log[] = 'Error creating attachment for image '' . $src . ''.';
+                            $image_log[] = "Error creating attachment for image '{$src}'.";
                         }
                     } else {
-                        $image_log[] = 'Error uploading image '' . $src . '': ' . $upload['error'];
+                        $image_log[] = "Error uploading image '{$src}': " . $upload['error'];
                     }
                 } else {
-                    $image_log[] = 'Image '' . $src . '' not found in the zip file.';
+                    $image_log[] = "Image '{$src}' not found in the zip file.";
                 }
             }
         }
@@ -261,7 +325,7 @@ class Gurkha_WP_Import_Admin {
 
         $post_id = wp_insert_post( $post_data );
 
-        if ( ! is_wp_error( $post_id ) ) {
+    if ( ! is_wp_error( $post_id ) ) {
             // Set tags
             if ( isset( $meta_data['tags'] ) ) {
                 wp_set_post_tags( $post_id, $meta_data['tags'] );
@@ -274,6 +338,11 @@ class Gurkha_WP_Import_Admin {
 
             if ( isset( $meta_data['focusKeywords'] ) ) {
                 update_post_meta( $post_id, 'rank_math_focus_keyword', implode( ', ', $meta_data['focusKeywords'] ) );
+            }
+
+            // Persist image log for preview screen
+            if ( ! empty( $image_log ) ) {
+                set_transient( 'gurkha_wp_import_image_log_' . $post_id, $image_log, HOUR_IN_SECONDS );
             }
 
             return $post_id;
@@ -300,6 +369,56 @@ class Gurkha_WP_Import_Admin {
         }
 
         rmdir( $temp_dir );
+    }
+
+    /**
+     * Sanitize JSON string to improve compatibility:
+     * - Remove UTF-8 BOM
+     * - Strip XML CDATA and fenced code blocks
+     * - Normalize smart quotes to ASCII quotes
+     * - Remove trailing commas in objects/arrays
+     * - Trim control chars/whitespace
+     *
+     * @param string $raw
+     * @return string
+     */
+    private function sanitize_json( $raw ) {
+        if ( ! is_string( $raw ) ) { return ''; }
+
+        // Remove UTF-8 BOM
+        if ( substr( $raw, 0, 3 ) === "\xEF\xBB\xBF" ) {
+            $raw = substr( $raw, 3 );
+        }
+
+        // Normalize line endings
+        $raw = str_replace( array("\r\n", "\r"), "\n", $raw );
+
+        // Strip leading control chars
+        $raw = preg_replace( '/^[\x00-\x20\x{FEFF}]+/u', '', $raw );
+
+        // Strip XML CDATA wrapper
+        if ( preg_match( '/^\s*<!\[CDATA\[(.*)\]\]>\s*$/s', $raw, $m ) ) {
+            $raw = $m[1];
+        }
+
+        // Strip fenced code blocks ```json ... ```
+        if ( preg_match( '/^\s*```/m', $raw ) ) {
+            if ( preg_match( '/^\s*```[a-zA-Z]*\s*(.*?)\s*```\s*$/s', $raw, $fm ) ) {
+                $raw = $fm[1];
+            }
+        }
+
+        // Replace curly quotes with straight quotes
+            $raw = str_replace(
+                array("\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\x98", "\xE2\x80\x99"),
+                array('"', '"', '\'', '\''),
+                $raw
+            );
+
+        // Remove trailing commas in objects and arrays
+        $raw = preg_replace( '/,\s*([}\]])/', '$1', $raw );
+
+        return trim( $raw );
     }
 
 }
