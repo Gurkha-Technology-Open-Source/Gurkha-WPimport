@@ -51,6 +51,19 @@
                     echo '</ul>';
                     delete_transient( 'gurkha_wp_import_image_log_' . $post_id );
                 }
+
+                if ( isset( $_GET['verbose'] ) && $_GET['verbose'] == '1' ) {
+                    $import_log = get_transient( 'gurkha_wp_import_import_log_' . $post_id );
+                    if ( $import_log ) {
+                        echo '<h4>Verbose Import Log</h4>';
+                        echo '<ol style="max-height: 300px; overflow:auto; background:#fff; padding:10px; border:1px solid #ccd0d4;">';
+                        foreach ( $import_log as $log ) {
+                            echo '<li>' . esc_html( $log ) . '</li>';
+                        }
+                        echo '</ol>';
+                        delete_transient( 'gurkha_wp_import_import_log_' . $post_id );
+                    }
+                }
             }
         }
     }
@@ -61,6 +74,11 @@
         <p>
             <label for="zip_file">Select a .zip file to upload:</label>
             <input type="file" id="zip_file" name="zip_file" accept=".zip">
+        </p>
+        <p>
+            <label>
+                <input type="checkbox" name="gwi_verbose" value="1" /> Verbose logging
+            </label>
         </p>
         <?php submit_button( 'Upload and Import' ); ?>
     </form>
