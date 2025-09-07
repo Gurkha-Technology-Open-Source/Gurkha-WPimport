@@ -184,18 +184,28 @@ class Gurkha_WP_Import_Admin {
                     new RecursiveDirectoryIterator( $temp_dir, RecursiveDirectoryIterator::SKIP_DOTS )
                 );
 
+                $featured_image_candidates = array();
+
                 foreach ( $iterator as $fileinfo ) {
                     if ( ! $fileinfo->isFile() ) { continue; }
                     $ext = strtolower( $fileinfo->getExtension() );
+                    $basename = strtolower( basename( $fileinfo->getPathname() ) );
+                    
                     if ( in_array( $ext, array( 'html', 'htm' ), true ) ) {
                         $html_candidates[] = $fileinfo->getPathname();
                     } elseif ( 'json' === $ext ) {
                         $json_candidates[] = $fileinfo->getPathname();
+                    } elseif ( in_array( $ext, array( 'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg' ), true ) ) {
+                        // Check if this could be a featured image
+                        if ( strpos( $basename, 'featured-image' ) !== false ) {
+                            $featured_image_candidates[] = $fileinfo->getPathname();
+                        }
                     }
                 }
                 if ( $verbose ) {
                     $import_log[] = 'HTML candidates: ' . ( empty( $html_candidates ) ? 'none' : implode( ', ', array_map( 'basename', $html_candidates ) ) );
                     $import_log[] = 'JSON candidates: ' . ( empty( $json_candidates ) ? 'none' : implode( ', ', array_map( 'basename', $json_candidates ) ) );
+                    $import_log[] = 'Featured image candidates: ' . ( empty( $featured_image_candidates ) ? 'none' : implode( ', ', array_map( 'basename', $featured_image_candidates ) ) );
                 }
 
                 // Pick HTML: prefer a file named like content/index, else largest by size, else first
@@ -252,7 +262,7 @@ class Gurkha_WP_Import_Admin {
                 }
 
                 // Process the files
-                $post_id = $this->process_import( $temp_dir, $content_file, $meta_file, $import_log, $verbose );
+                $post_id = $this->process_import( $temp_dir, $content_file, $meta_file, $featured_image_candidates, $import_log, $verbose );
 
                 // Clean up the temporary directory
                 $this->cleanup_temp_dir( $temp_dir );
@@ -276,7 +286,7 @@ class Gurkha_WP_Import_Admin {
      * @since    1.0.0
      * @param    string    $temp_dir    The temporary directory where the files are located.
      */
-    private function process_import( $temp_dir, $content_file, $meta_file, &$import_log = array(), $verbose = false ) {
+    private function process_import( $temp_dir, $content_file, $meta_file, $featured_image_candidates = array(), &$import_log = array(), $verbose = false ) {
         // Load meta
         $meta_raw_original = file_get_contents( $meta_file );
         if ( $verbose ) { $import_log[] = 'Selected JSON file: ' . basename( $meta_file ) . ' (' . strlen( $meta_raw_original ) . ' bytes)'; }
@@ -397,6 +407,39 @@ class Gurkha_WP_Import_Admin {
             if ( isset( $meta_data['focusKeywords'] ) ) {
                 update_post_meta( $post_id, 'rank_math_focus_keyword', implode( ', ', $meta_data['focusKeywords'] ) );
                 if ( $verbose ) { $import_log[] = 'RankMath focus keywords set (' . count( (array) $meta_data['focusKeywords'] ) . ' items)'; }
+            }
+
+            // Set featured image if available
+            if ( ! empty( $featured_image_candidates ) ) {
+                $featured_image_path = $featured_image_candidates[0]; // Use first match
+                if ( file_exists( $featured_image_path ) ) {
+                    $featured_upload = wp_upload_bits( basename( $featured_image_path ), null, file_get_contents( $featured_image_path ) );
+                    
+                    if ( ! $featured_upload['error'] ) {
+                        $featured_attachment = array(
+                            'post_mime_type' => wp_check_filetype( $featured_upload['file'] )['type'] ?? '',
+                            'post_title'     => preg_replace( '/\.[^.]+$/', '', basename( $featured_image_path ) ),
+                            'post_content'   => '',
+                            'post_status'    => 'inherit'
+                        );
+
+                        $featured_attachment_id = wp_insert_attachment( $featured_attachment, $featured_upload['file'] );
+
+                        if ( ! is_wp_error( $featured_attachment_id ) ) {
+                            require_once( ABSPATH . 'wp-admin/includes/image.php' );
+                            $featured_attachment_data = wp_generate_attachment_metadata( $featured_attachment_id, $featured_upload['file'] );
+                            wp_update_attachment_metadata( $featured_attachment_id, $featured_attachment_data );
+
+                            // Set as featured image
+                            set_post_thumbnail( $post_id, $featured_attachment_id );
+                            if ( $verbose ) { $import_log[] = 'Featured image set: ' . basename( $featured_image_path ); }
+                        } else {
+                            if ( $verbose ) { $import_log[] = 'Error creating featured image attachment: ' . basename( $featured_image_path ); }
+                        }
+                    } else {
+                        if ( $verbose ) { $import_log[] = 'Error uploading featured image: ' . $featured_upload['error']; }
+                    }
+                }
             }
 
             // Persist image log for preview screen
