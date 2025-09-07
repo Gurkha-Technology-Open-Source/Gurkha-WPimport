@@ -1,0 +1,135 @@
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<productRequirementsDocument>
+    <header>
+        <name>Bundle Post Importer</name>
+        <version>1.0</version>
+        <owner>Internal (custom use)</owner>
+        <platform>WordPress (RankMath SEO integrated)</platform>
+    </header>
+    
+    <objective>
+        Develop a WordPress plugin to automate creating blog posts by uploading a .zip bundle containing:
+        <file>content.html (main post body, can include images with relative paths)</file>
+        <file>meta.json (SEO metadata, title, slug, tags, focus keywords)</file>
+        <file>Image files referenced in the HTML</file>
+        
+        The plugin will:
+        <step>1. Extract the bundle</step>
+        <step>2. Parse metadata from JSON</step>
+        <step>3. Upload images to Media Library</step>
+        <step>4. Replace relative image paths in HTML with WordPress media URLs</step>
+        <step>5. Create a new post with RankMath SEO fields set</step>
+        
+        <note>The content will be inserted as raw HTML; no WPBakery handling is required.</note>
+    </objective>
+    
+    <inputs>
+        <bundleStructure>
+            <file>bundle.zip</file>
+            <file>content.html</file>
+            <file>meta.json</file>
+            <file>image1.jpg</file>
+            <file>image2.png</file>
+        </bundleStructure>
+        
+        <metaExample>
+            <![CDATA[
+{
+  "metaTitle": "B2B Digital Marketing Nepal: Research, Strategy & Success",
+  "metaDescription": "Explore Nepal's B2B digital marketing landscape. Discover key sectors, growth opportunities, and a strategic blueprint for success in IT, manufacturing, tourism & more.",
+  "slug": "b2b-digital-marketing-nepal-research-strategy",
+  "focusKeywords": [
+    "B2B digital marketing Nepal",
+    "Nepal B2B strategy",
+    "Nepali B2B market research"
+  ],
+  "tags": [
+    "B2B Marketing Nepal",
+    "Digital Strategy",
+    "Nepali Business Landscape",
+    "SME Nepal",
+    "IT Sector Nepal",
+    "Market Research",
+    "Business Growth"
+  ]
+}
+            ]]>
+        </metaExample>
+    </inputs>
+    
+    <functionalRequirements>
+        <requirement id="3.1">
+            <title>Zip Upload & Extraction</title>
+            <description>Admin uploads .zip via a custom WP-Admin page: Posts → Import Bundle</description>
+            <description>Plugin extracts files to a temporary directory</description>
+            <description>Validates presence of content.html and meta.json</description>
+        </requirement>
+        
+        <requirement id="3.2">
+            <title>HTML Processing</title>
+            <description>Read content.html</description>
+            <description>Detect &lt;img src="..."&gt; tags with relative paths (e.g., image1.jpg)</description>
+            <description>Match filenames with files in the bundle</description>
+            <description>Upload matched images to Media Library (wp_insert_attachment)</description>
+            <description>Replace original src paths with WordPress media URLs</description>
+            <description>Save modified HTML as post_content</description>
+        </requirement>
+        
+        <requirement id="3.3">
+            <title>Metadata Handling</title>
+            <mapping>Post title = metaTitle</mapping>
+            <mapping>Post slug = slug</mapping>
+            <mapping>Post tags = tags</mapping>
+            <mapping>metaDescription → RankMath description</mapping>
+            <mapping>focusKeywords → RankMath focus keyword</mapping>
+        </requirement>
+        
+        <requirement id="3.4">
+            <title>Post Creation</title>
+            <field>post_title</field>
+            <field>post_content (HTML with updated image URLs)</field>
+            <field>post_name (slug)</field>
+            <field>post_status = draft (default)</field>
+            <action>Apply tags</action>
+            <action>Save RankMath SEO fields</action>
+        </requirement>
+        
+        <requirement id="3.5">
+            <title>Preview & Logging</title>
+            <previewItem>Title, slug, tags</previewItem>
+            <previewItem>Content with updated image URLs</previewItem>
+            <action>Log status for each image (success/failure)</action>
+            <action>Link to edit post in WordPress</action>
+        </requirement>
+    </functionalRequirements>
+    
+    <nonFunctionalRequirements>
+        <requirement>Handle missing files gracefully (log errors if JSON or HTML is missing)</requirement>
+        <requirement>Validate JSON before use</requirement>
+        <requirement>Cleanup temporary files after import</requirement>
+        <requirement>Security: only Admin users can access upload</requirement>
+        <requirement>Performance: support bundles up to 10 MB</requirement>
+    </nonFunctionalRequirements>
+    
+    <adminUI>
+        <menuLocation>Posts → Import Bundle</menuLocation>
+        <component>Upload field for .zip file + Submit button</component>
+        <postUploadAction>Preview parsed title, slug, tags</postUploadAction>
+        <postUploadAction>Show success/failure for images</postUploadAction>
+        <postUploadAction>Link to edit the created post</postUploadAction>
+    </adminUI>
+    
+    <outOfScope>
+        <item>WPBakery handling</item>
+        <item>Featured image auto-generation</item>
+        <item>Handling external images (only local bundle images supported)</item>
+    </outOfScope>
+    
+    <futureEnhancements>
+        <enhancement>Batch import multiple bundles at once</enhancement>
+        <enhancement>CLI command for automation (wp bundle-import)</enhancement>
+        <enhancement>Optional AI-generated featured images</enhancement>
+    </futureEnhancements>
+</productRequirementsDocument>
+```
