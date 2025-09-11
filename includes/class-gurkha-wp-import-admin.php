@@ -133,9 +133,17 @@ class Gurkha_WP_Import_Admin {
      */
     public function handle_file_upload() {
         if ( isset( $_POST['gurkha_wp_import_nonce'] ) && wp_verify_nonce( $_POST['gurkha_wp_import_nonce'], 'gurkha_wp_import' ) ) {
+            $verbose = isset( $_POST['gwi_verbose'] );
+            
+            // Check for bulk upload (multiple files)
+            if ( isset( $_FILES['zip_files'] ) && is_array( $_FILES['zip_files']['name'] ) ) {
+                $this->handle_bulk_upload( $_FILES['zip_files'], $verbose );
+                return;
+            }
+            
+            // Handle single file upload
             if ( isset( $_FILES['zip_file'] ) ) {
                 $file = $_FILES['zip_file'];
-                $verbose = isset( $_POST['gwi_verbose'] );
                 $import_log = array();
 
                 // Check for errors
@@ -281,6 +289,193 @@ class Gurkha_WP_Import_Admin {
     }
 
     /**
+     * Handle bulk file upload and import process.
+     *
+     * @since    1.0.0
+     */
+    private function handle_bulk_upload( $files, $verbose = false ) {
+        $bulk_results = array();
+        $file_count = count( $files['name'] );
+        
+        for ( $i = 0; $i < $file_count; $i++ ) {
+            $file = array(
+                'name'     => $files['name'][$i],
+                'type'     => $files['type'][$i],
+                'tmp_name' => $files['tmp_name'][$i],
+                'error'    => $files['error'][$i],
+                'size'     => $files['size'][$i]
+            );
+            
+            $result = array(
+                'filename' => $file['name'],
+                'success'  => false,
+                'post_id'  => 0,
+                'post_title' => '',
+                'error'    => ''
+            );
+            
+            try {
+                // Skip empty slots
+                if ( $file['error'] === UPLOAD_ERR_NO_FILE ) {
+                    continue;
+                }
+                
+                // Check for upload errors
+                if ( $file['error'] !== UPLOAD_ERR_OK ) {
+                    $result['error'] = 'Upload error: ' . $file['error'];
+                    $bulk_results[] = $result;
+                    continue;
+                }
+                
+                // Check file type
+                $file_type = wp_check_filetype( $file['name'] );
+                if ( $file_type['ext'] !== 'zip' ) {
+                    $result['error'] = 'Invalid file type. Must be .zip';
+                    $bulk_results[] = $result;
+                    continue;
+                }
+                
+                // Process this file
+                $post_id = $this->process_single_file( $file, $verbose );
+                
+                if ( $post_id > 0 ) {
+                    $post = get_post( $post_id );
+                    $result['success'] = true;
+                    $result['post_id'] = $post_id;
+                    $result['post_title'] = $post ? $post->post_title : 'Unknown';
+                } else {
+                    $result['error'] = 'Import failed';
+                }
+                
+            } catch ( Exception $e ) {
+                $result['error'] = $e->getMessage();
+            }
+            
+            $bulk_results[] = $result;
+        }
+        
+        // Store results for display
+        set_transient( 'gurkha_wp_import_bulk_results', $bulk_results, HOUR_IN_SECONDS );
+        
+        // Redirect to results page
+        wp_redirect( admin_url( 'edit.php?page=' . $this->plugin_name . '&bulk_success=1' ) );
+        exit;
+    }
+
+    /**
+     * Process a single file (extracted from handle_file_upload for reuse).
+     *
+     * @since    1.0.0
+     */
+    private function process_single_file( $file, $verbose = false ) {
+        $import_log = array();
+        
+        // Create a temporary directory
+        $temp_dir = trailingslashit( get_temp_dir() ) . uniqid( 'gurkha-wp-import-' );
+        if ( ! wp_mkdir_p( $temp_dir ) ) {
+            throw new Exception( 'Could not create temporary directory.' );
+        }
+        if ( $verbose ) { $import_log[] = 'Temp dir created: ' . $temp_dir; }
+
+        // Move the uploaded file to the temporary directory
+        $uploaded_file = trailingslashit( $temp_dir ) . $file['name'];
+        if ( ! move_uploaded_file( $file['tmp_name'], $uploaded_file ) ) {
+            $this->cleanup_temp_dir( $temp_dir );
+            throw new Exception( 'Could not move uploaded file.' );
+        }
+
+        // Extract the zip archive
+        $zip = new ZipArchive();
+        if ( $zip->open( $uploaded_file ) === TRUE ) {
+            $zip->extractTo( $temp_dir );
+            $zip->close();
+        } else {
+            $this->cleanup_temp_dir( $temp_dir );
+            throw new Exception( 'Could not extract zip archive.' );
+        }
+        if ( $verbose ) { $import_log[] = 'ZIP extracted: ' . basename( $file['name'] ); }
+
+        // Discover content files
+        $html_candidates = array();
+        $json_candidates = array();
+        $featured_image_candidates = array();
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $temp_dir, RecursiveDirectoryIterator::SKIP_DOTS )
+        );
+
+        foreach ( $iterator as $fileinfo ) {
+            if ( ! $fileinfo->isFile() ) { continue; }
+            $ext = strtolower( $fileinfo->getExtension() );
+            $basename = strtolower( basename( $fileinfo->getPathname() ) );
+            
+            if ( in_array( $ext, array( 'html', 'htm' ), true ) ) {
+                $html_candidates[] = $fileinfo->getPathname();
+            } elseif ( 'json' === $ext ) {
+                $json_candidates[] = $fileinfo->getPathname();
+            } elseif ( in_array( $ext, array( 'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg' ), true ) ) {
+                // Check if this could be a featured image
+                if ( strpos( $basename, 'featured-image' ) !== false ) {
+                    $featured_image_candidates[] = $fileinfo->getPathname();
+                }
+            }
+        }
+
+        // Select best files
+        $content_file = '';
+        $meta_file = '';
+
+        // Pick HTML
+        if ( ! empty( $html_candidates ) ) {
+            $preferred = array_filter( $html_candidates, function( $p ) {
+                $name = strtolower( basename( $p ) );
+                return ( $name === 'content.html' || $name === 'index.html' || $name === 'content.htm' || $name === 'index.htm' );
+            } );
+            if ( ! empty( $preferred ) ) {
+                $content_file = reset( $preferred );
+            } else {
+                usort( $html_candidates, function( $a, $b ) { return filesize( $b ) <=> filesize( $a ); } );
+                $content_file = $html_candidates[0];
+            }
+        }
+
+        // Pick JSON
+        if ( ! empty( $json_candidates ) ) {
+            foreach ( $json_candidates as $candidate ) {
+                $raw0 = @file_get_contents( $candidate );
+                if ( false === $raw0 ) { continue; }
+                $data = json_decode( $raw0, true );
+                if ( json_last_error() === JSON_ERROR_NONE && is_array( $data ) && isset( $data['metaTitle'], $data['slug'] ) ) {
+                    $meta_file = $candidate;
+                    break;
+                }
+                $raw1 = $this->sanitize_json( $raw0 );
+                $data = json_decode( $raw1, true );
+                if ( json_last_error() === JSON_ERROR_NONE && is_array( $data ) && isset( $data['metaTitle'], $data['slug'] ) ) {
+                    $meta_file = $candidate;
+                    break;
+                }
+            }
+            if ( empty( $meta_file ) ) {
+                $meta_file = $json_candidates[0];
+            }
+        }
+
+        if ( empty( $content_file ) || empty( $meta_file ) ) {
+            $this->cleanup_temp_dir( $temp_dir );
+            throw new Exception( 'Invalid zip archive. Missing HTML content or JSON metadata.' );
+        }
+
+        // Process the import
+        $post_id = $this->process_import( $temp_dir, $content_file, $meta_file, $featured_image_candidates, $import_log, $verbose );
+
+        // Clean up
+        $this->cleanup_temp_dir( $temp_dir );
+
+        return $post_id;
+    }
+
+    /**
      * Process the import.
      *
      * @since    1.0.0
@@ -379,12 +574,17 @@ class Gurkha_WP_Import_Admin {
 
         $content = $doc->saveHTML();
 
+        // Get next available publish date
+        $publish_date = $this->get_next_available_publish_date();
+        if ( $verbose ) { $import_log[] = 'Scheduled publish date: ' . $publish_date; }
+
         // Create post
         $post_data = array(
             'post_title'   => $meta_data['metaTitle'],
             'post_content' => $content,
             'post_name'    => $meta_data['slug'],
-            'post_status'  => 'draft',
+            'post_status'  => 'future',
+            'post_date'    => $publish_date,
             'post_author'  => get_current_user_id(),
         );
 
@@ -535,6 +735,58 @@ class Gurkha_WP_Import_Admin {
     $raw = preg_replace( '/,\s*([}\]])/', '$1', $raw );
 
         return trim( $raw );
+    }
+
+    /**
+     * Find the next available date without scheduled posts.
+     *
+     * @since    1.0.0
+     * @return   string  MySQL datetime format
+     */
+    private function get_next_available_publish_date() {
+        global $wpdb;
+        
+        // Start from today
+        $current_date = new DateTime();
+        $max_attempts = 365; // Don't search more than a year ahead
+        $attempt = 0;
+        
+        while ( $attempt < $max_attempts ) {
+            $date_string = $current_date->format( 'Y-m-d' );
+            
+            // Check if any posts are scheduled for this date
+            $scheduled_count = $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->posts} 
+                WHERE post_status IN ('publish', 'future') 
+                AND DATE(post_date) = %s 
+                AND post_type = 'post'",
+                $date_string
+            ) );
+            
+            // If no posts scheduled for this date, use it
+            if ( $scheduled_count == 0 ) {
+                // Generate random time between 9 AM and 6 PM
+                $hour = wp_rand( 9, 18 );
+                $minute = wp_rand( 0, 59 );
+                $second = wp_rand( 0, 59 );
+                
+                $current_date->setTime( $hour, $minute, $second );
+                return $current_date->format( 'Y-m-d H:i:s' );
+            }
+            
+            // Move to next day
+            $current_date->add( new DateInterval( 'P1D' ) );
+            $attempt++;
+        }
+        
+        // Fallback: if we can't find an empty day, schedule for tomorrow with random time
+        $fallback_date = new DateTime( '+1 day' );
+        $hour = wp_rand( 9, 18 );
+        $minute = wp_rand( 0, 59 );
+        $second = wp_rand( 0, 59 );
+        $fallback_date->setTime( $hour, $minute, $second );
+        
+        return $fallback_date->format( 'Y-m-d H:i:s' );
     }
 
 }

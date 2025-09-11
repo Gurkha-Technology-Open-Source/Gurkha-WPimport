@@ -18,6 +18,39 @@
     <h2><?php echo esc_html( get_admin_page_title() ); ?></h2>
 
     <?php
+    // Handle bulk import results
+    if ( isset( $_GET['bulk_success'] ) && $_GET['bulk_success'] == 1 ) {
+        $bulk_results = get_transient( 'gurkha_wp_import_bulk_results' );
+        if ( $bulk_results ) {
+            echo '<div class="updated"><p>Bulk import completed! Processed ' . count( $bulk_results ) . ' files.</p></div>';
+            
+            echo '<h3>Bulk Import Results</h3>';
+            echo '<table class="wp-list-table widefat fixed striped">';
+            echo '<thead><tr><th>File</th><th>Status</th><th>Post</th><th>Actions</th></tr></thead>';
+            echo '<tbody>';
+            
+            foreach ( $bulk_results as $result ) {
+                echo '<tr>';
+                echo '<td>' . esc_html( $result['filename'] ) . '</td>';
+                
+                if ( $result['success'] ) {
+                    echo '<td><span style="color: green;">✓ Success</span></td>';
+                    echo '<td>' . esc_html( $result['post_title'] ) . '</td>';
+                    echo '<td><a href="' . get_edit_post_link( $result['post_id'] ) . '" target="_blank">Edit Post</a></td>';
+                } else {
+                    echo '<td><span style="color: red;">✗ Failed</span></td>';
+                    echo '<td colspan="2">' . esc_html( $result['error'] ) . '</td>';
+                }
+                
+                echo '</tr>';
+            }
+            
+            echo '</tbody></table>';
+            delete_transient( 'gurkha_wp_import_bulk_results' );
+        }
+    }
+    
+    // Handle single import results  
     if ( isset( $_GET['success'] ) && $_GET['success'] == 1 ) {
         echo '<div class="updated"><p>Post imported successfully!</p></div>';
 
@@ -71,15 +104,25 @@
 
     <form method="post" action="" enctype="multipart/form-data">
         <?php wp_nonce_field( 'gurkha_wp_import', 'gurkha_wp_import_nonce' ); ?>
+        
+        <h3>Single File Import</h3>
         <p>
             <label for="zip_file">Select a .zip file to upload:</label>
             <input type="file" id="zip_file" name="zip_file" accept=".zip">
         </p>
+        
+        <h3>Bulk Import</h3>
+        <p>
+            <label for="zip_files">Select multiple .zip files to upload:</label>
+            <input type="file" id="zip_files" name="zip_files[]" accept=".zip" multiple>
+        </p>
+        
         <p>
             <label>
                 <input type="checkbox" name="gwi_verbose" value="1" /> Verbose logging
             </label>
         </p>
+        
         <?php submit_button( 'Upload and Import' ); ?>
     </form>
 
